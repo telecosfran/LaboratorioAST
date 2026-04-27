@@ -29,10 +29,15 @@ public class TSocket extends TSocket_base {
         // init sender variables
         MSS = p.getNetwork().getMTU() - Const.IP_HEADER - Const.TCP_HEADER;
         snd_rcvWnd = Const.RCV_QUEUE_SIZE;
+        snd_sndNxt = 0;
+        snd_rcvNxt = 0;
+        zero_wnd_probe_ON = false;
 
         // init receiver variables
         rcv_Queue = new CircularQueue<>(Const.RCV_QUEUE_SIZE);
         //rcv_Queue = new CircularQueue<>(2);
+        rcv_SegConsumedBytes = 0;
+        rcv_rcvNxt = 0;
 
     }
 
@@ -41,21 +46,78 @@ public class TSocket extends TSocket_base {
     public void sendData(byte[] data, int offset, int length) {
         lock.lock();
         try {
-            throw new RuntimeException("//Completar...");
+
+            int sent = 0;
+            while (sent < length) {
+
+                while (this.snd_sndNxt != this.snd_rcvNxt) {
+
+                    appCV.awaitUninterruptibly();
+                }
+
+                if (snd_rcvWnd == 0) {
+
+                    if (!this.zero_wnd_probe_ON) {
+
+                        this.zero_wnd_probe_ON = true;
+                        log.printRED("zero-window probe ON");
+                    }
+
+                    int chunksize = 1;
+                    TCPSegment probe = segmentize(data, offset + sent, chunksize);
+                    network.send(probe);
+                    log.printPURPLE("0_wnd probe: " + probe);
+                    startRTO(probe);
+
+                    snd_sndNxt++;
+                    sent += chunksize;
+                } else {
+
+                    if (this.zero_wnd_probe_ON) {
+                        this.zero_wnd_probe_ON = false;
+                        log.printRED("zero-window probe OFF");
+
+                    }
+                    int chunkSize = Math.min(MSS, length - sent);
+                    TCPSegment seg = segmentize(data, offset + sent, chunkSize);
+
+                    network.send(seg);
+                    printSndSeg(seg);
+                    startRTO(seg);
+
+                    snd_sndNxt++;
+                    sent += chunkSize;
+                }
+            }
         } finally {
             lock.unlock();
         }
     }
 
     protected TCPSegment segmentize(byte[] data, int offset, int length) {
-        throw new RuntimeException("//Completar...");
+
+        TCPSegment seg = new TCPSegment();
+        seg.setData(data, offset, length);
+        seg.setPsh(true);
+        seg.setSourcePort(localPort);
+        seg.setDestinationPort(remotePort);
+
+        seg.setSeqNum(snd_sndNxt);
+
+        return seg;
     }
 
     @Override
     protected void timeout(TCPSegment seg) {
         lock.lock();
         try {
-            throw new RuntimeException("//Completar...");
+
+            if (seg.getSeqNum() >= snd_rcvNxt) {
+
+                log.printPURPLE("retrans: " + seg);
+                network.send(seg);
+                startRTO(seg);
+            }
         } finally {
             lock.unlock();
         }
@@ -66,7 +128,13 @@ public class TSocket extends TSocket_base {
     public int receiveData(byte[] buf, int offset, int maxlen) {
         lock.lock();
         try {
-            throw new RuntimeException("//Completar...");
+
+            while (rcv_Queue.empty()) {
+
+                appCV.awaitUninterruptibly();
+            }
+
+            return this.consumeSegment(buf, offset, maxlen);
         } finally {
             lock.unlock();
         }
@@ -85,7 +153,17 @@ public class TSocket extends TSocket_base {
     }
 
     protected void sendAck() {
-        throw new RuntimeException("//Completar...");
+
+        TCPSegment ack = new TCPSegment();
+        ack.setAck(true);
+        ack.setSourcePort(localPort);
+        ack.setDestinationPort(remotePort);
+
+        ack.setAckNum(rcv_rcvNxt);
+        ack.setWnd(rcv_Queue.free());
+
+        network.send(ack);
+        printSndSeg(ack);
     }
 
     // -------------  SEGMENT ARRIVAL  -------------
@@ -93,7 +171,36 @@ public class TSocket extends TSocket_base {
     public void processReceivedSegment(TCPSegment rseg) {
         lock.lock();
         try {
-            throw new RuntimeException("//Completar...");
+
+            printRcvSeg(rseg);
+
+            if (rseg.isPsh()) {
+
+                if (!rcv_Queue.full()) {
+
+                    if (rseg.getSeqNum() == rcv_rcvNxt) {
+
+                        rcv_Queue.put(rseg);
+                        rcv_rcvNxt++;
+                        appCV.signal();
+                    }
+                }
+                sendAck();
+
+            }
+
+            if (rseg.isAck()) {
+
+                if (rseg.getAckNum() > snd_rcvNxt) {
+
+                    snd_rcvNxt = rseg.getAckNum();
+                }
+
+                snd_rcvWnd = rseg.getWnd();
+                appCV.signalAll();
+
+            }
+
         } finally {
             lock.unlock();
         }
