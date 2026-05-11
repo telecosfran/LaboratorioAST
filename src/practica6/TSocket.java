@@ -51,7 +51,7 @@ public class TSocket extends TSocket_base {
             int sent = 0;
             while (sent < length) {
 
-                this.snd_minWnd = Math.max(1, snd_minWnd);
+                this.snd_minWnd = Math.max(1, Math.min(snd_rcvWnd, snd_cngWnd));
 
                 while (this.snd_sndNxt - this.snd_rcvNxt >= this.snd_minWnd) {
 
@@ -167,7 +167,7 @@ public class TSocket extends TSocket_base {
         ack.setSourcePort(localPort);
         ack.setDestinationPort(remotePort);
 
-        ack.setSeqNum(snd_rcvNxt);
+        ack.setAckNum(rcv_rcvNxt);
         ack.setWnd(this.rcv_Queue.free());
 
         network.send(ack);
@@ -196,7 +196,7 @@ public class TSocket extends TSocket_base {
                         rcv_rcvNxt++;
                         appCV.signal();
                         
-                        while(this.out_of_order_segs.containsKey(rcv_rcvNxt)){
+                        while(this.out_of_order_segs.containsKey(rcv_rcvNxt) && !this.rcv_Queue.full()){
                         
                             this.rcv_Queue.put(this.out_of_order_segs.remove(rcv_rcvNxt));
                             rcv_rcvNxt++;
@@ -217,6 +217,7 @@ public class TSocket extends TSocket_base {
                 }
 
                 snd_rcvWnd = rseg.getWnd();
+                this.snd_minWnd = Math.min(snd_rcvWnd, snd_cngWnd);
                 appCV.signalAll();
 
             }
